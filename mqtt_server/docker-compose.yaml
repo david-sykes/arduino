@@ -1,0 +1,31 @@
+version: "3.9"
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+
+  logger:
+    image: eclipse-mosquitto:2
+    container_name: mosq-logger
+    restart: unless-stopped
+    depends_on: [mosquitto]
+    volumes:
+      - ./data:/data
+    command: >
+      sh -c "
+        mosquitto_sub -h mosquitto -t '#' -v |
+        awk -v q='\"' '{
+          topic=$1; $1=\"\"; sub(/^ /,\"\",$0);
+          payload=$0;
+          cmd=\"date -Iseconds\"; cmd|getline ts; close(cmd);
+          gsub(q, \"\\\\\\\"\", payload);
+          printf(\"{\\\"ts\\\":\\\"%s\\\",\\\"topic\\\":\\\"%s\\\",\\\"payload\\\":\\\"%s\\\"}\\n\", ts, topic, payload);
+        }' >> /data/mqtt.jsonl
+      "

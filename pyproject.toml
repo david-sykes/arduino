@@ -1,0 +1,17 @@
+[project]
+name = "platform-mvp"
+version = "0.1.0"
+description = "Virtual env for network nation platform"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "esptool>=5.0.2",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    ".",
+]
+testpaths = [
+    "tests",
+]
