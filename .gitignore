@@ -3,3 +3,6 @@
 mosquitto.db
 mqtt_server/data/mqtt.jsonl
 mosquitto.log
+
+logs/
+*.png
