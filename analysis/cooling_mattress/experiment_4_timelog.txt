@@ -1,0 +1,8 @@
+Experiment 4 — Timelog
+======================
+
+Phase 0 (precool): Ice added to cooling bath. Starts at first MQTT reading.
+Phase 1 (reservoir_cool): Cooling loop on, mattress loop off but full, no human on mattress. Started ~2026-04-12T16:45Z.
+Phase 2 (ambient_warmup): No pumps on, no human on mattress, reservoir warming to ambient. Started ~measurement 73.
+Phase 3 (slug_mixing): Mattress pump on, warm stagnant loop water mixes with cold reservoir. Not modelled. Started ~measurement 139.
+Phase 4 (human_heat): Mattress loop on, cooling loop off, human on mattress. Started ~measurement 141.

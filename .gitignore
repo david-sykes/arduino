@@ -1,7 +1,9 @@
 *secrets*
+__pycache__/
 
 mosquitto.db
 mqtt_server/data/mqtt.jsonl
+*_mqtt.jsonl
 mosquitto.log
 
 logs/
