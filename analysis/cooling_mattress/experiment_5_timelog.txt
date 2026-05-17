@@ -1,0 +1,20 @@
+Experiment 5 — Timelog
+======================
+
+Setup change: quieter, less powerful pumps. Reservoir increased to 4 L.
+Pump flow rates: cooling-loop 1 L / 30 s ≈ 0.033 kg/s (2 L/min)
+                 mattress-loop 1 L / 30 s ≈ 0.033 kg/s (2 L/min)
+
+Phases named by which loops are on.
+Note: slug mixing (warm stagnant mattress-loop water mixing in when mattress pump first turns on)
+overlaps with the start of the cool_off_mattress_on phase — first ~6 measurements after pump on.
+Fit window for h_amb_running starts after settling (phase 4).
+
+Phase 0 (cool_off_mattress_off_precool): Ice added to cooling bath, no pumps. Starts at first MQTT reading.
+Phase 1 (cool_on_mattress_off): Cooling loop on, mattress loop off but full, no human. Started ~measurement 33 (2026-05-16T12:42Z).
+Phase 2 (cool_off_mattress_off): Both loops off, no human, reservoir warming to ambient. Started ~measurement 63 (2026-05-16T12:57Z).
+Phase 3 (cool_off_mattress_on): Mattress pump turned on — slug mixing transient (~6 measurements). Started ~measurement 98 (2026-05-16T13:14Z).
+Phase 4 (cool_off_mattress_on_settled): Mattress loop on, no human, transient settled — fit h_amb_running here. Started ~measurement 104.
+Phase 4b (cool_on_mattress_off_2): Cooling loop on again, mattress off — second pass for more data. Started ~measurement 168 (2026-05-16T13:49Z).
+Phase 5 (cool_off_mattress_on_human): Mattress loop on, human on mattress. Pump-on slug at 202 (first 6 ignored); h_body fit starts at measurement 208.
+Phase 6 (cool_on_mattress_on_human): Both loops on, human on mattress — full operational mode. Started ~measurement 242 (2026-05-16T14:26Z). Validation only (no fit).
