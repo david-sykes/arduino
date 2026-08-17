@@ -51,19 +51,16 @@ inputs and therefore invisible in the result.
 
 The chip contains five blocks worth knowing about.
 
-```mermaid
-flowchart LR
-    A0 --> MUX
-    A1 --> MUX
-    A2 --> MUX
-    A3 --> MUX
-    MUX[Input multiplexer<br/>4 to 1] --> PGA[Programmable<br/>gain amplifier]
-    PGA --> MOD[Delta-sigma<br/>modulator]
-    REF[4.096 V reference] --> MOD
-    MOD --> FILT[Digital filter<br/>decimator]
-    FILT --> REG[Conversion<br/>register]
-    REG --> I2C[I2C interface]
-    I2C --> ESP[ESP32]
+```
+ A0 ─┐   ┌───────┐   ┌───────┐   ┌─────────────┐   ┌──────────┐   ┌────────────┐   ┌───────────┐
+ A1 ─┤   │  MUX  │   │  PGA  │   │ delta-sigma │   │ digital  │   │ conversion │   │    I2C    │  SDA
+ A2 ─┼──▶│4 to 1 │──▶│  ×2   │──▶│  modulator  │──▶│  filter  │──▶│  register  │──▶│ interface │──▶
+ A3 ─┘   └───────┘   └───────┘   └──────▲──────┘   └──────────┘   └────────────┘   └───────────┘  SCL
+                                        │
+                                 ┌──────┴──────┐
+                                 │   4.096 V   │
+                                 │  reference  │
+                                 └─────────────┘
 ```
 
 ### The multiplexer
@@ -163,23 +160,53 @@ evenly spaced.
 
 ## 2. The signal's journey
 
-```mermaid
-flowchart TD
-    W[Mains conductor<br/>5.19 A rms] -->|magnetic field| C[CT core]
-    C -->|2000:1 turns ratio| S[Secondary current<br/>2.6 mA rms]
-    S -->|20 ohm burden| V[Differential voltage<br/>51.9 mV rms, floating]
-    V -->|bias divider| B[Same voltage,<br/>anchored at 1.65 V]
-    B -->|PGA x2| P[Amplified analogue]
-    P -->|delta-sigma| Q[Bitstream, then<br/>16-bit signed counts]
-    Q -->|I2C at 400 kHz| E[int16_t in ESP32 RAM]
-    E -->|sum, sum of squares| R[RMS in counts]
-    R -->|scale by constants| A[Amps as a double]
-    A -->|sprintf| T[ASCII text]
-    T -->|UART 9600 8N1| U[CP2102N bridge]
-    U -->|USB| D[/dev/cu.usbserial-143410]
-    D -->|pyserial| PY[Python string]
-    PY -->|pandas| DF[DataFrame]
-    DF -->|numpy FFT| PNG[Plot]
+```
+  Mains conductor, 5.19 A rms
+        │   magnetic field
+        ▼
+  CT ferrite core
+        │   2000:1 turns ratio
+        ▼
+  Secondary current, 2.6 mA rms
+        │   20 Ω burden resistor
+        ▼
+  Differential voltage, 51.9 mV rms          ← floating, no reference
+        │   10k/10k bias divider
+        ▼
+  Same voltage, anchored at 1.65 V
+        │   PGA ×2
+        ▼
+  Amplified analogue signal
+        │   delta-sigma modulator, then digital filter
+        ▼
+  16-bit signed counts, about 830 rms
+        │   I2C at 400 kHz, two bytes
+        ▼
+  int16_t in ESP32 RAM
+        │   running sum and sum of squares
+        ▼
+  RMS in counts
+        │   × volts_per_count × amps_per_volt
+        ▼
+  Amps, as a double
+        │   Serial.print
+        ▼
+  ASCII decimal text
+        │   UART, 9600 8N1
+        ▼
+  CP2102N bridge
+        │   USB
+        ▼
+  /dev/cu.usbserial-143410
+        │   pyserial
+        ▼
+  Python string
+        │   pandas
+        ▼
+  DataFrame
+        │   numpy FFT, matplotlib
+        ▼
+  PNG plot
 ```
 
 Stage by stage, with the numbers from the kettle capture.
