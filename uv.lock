@@ -648,6 +648,7 @@ dependencies = [
     { name = "esptool" },
     { name = "matplotlib" },
     { name = "pandas" },
+    { name = "pyserial" },
     { name = "scipy" },
 ]
 
@@ -656,6 +657,7 @@ requires-dist = [
     { name = "esptool", specifier = ">=5.0.2" },
     { name = "matplotlib", specifier = ">=3.0" },
     { name = "pandas", specifier = ">=2.0" },
+    { name = "pyserial", specifier = ">=3.5" },
     { name = "scipy", specifier = ">=1.17.1" },
 ]
 

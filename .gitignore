@@ -1,5 +1,6 @@
 *secrets*
 __pycache__/
+.DS_Store
 
 mosquitto.db
 mqtt_server/data/mqtt.jsonl
