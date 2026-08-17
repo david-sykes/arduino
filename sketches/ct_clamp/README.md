@@ -342,35 +342,137 @@ next stage solves.
 
 ### 3. Anchoring the pair
 
-The coil connects the two wires to each other, so they always sit at the same
-potential plus or minus the coil's output. But nothing decides what that
-potential is relative to the ESP32's ground, so the pair drifts, and it drifted
-by about 4 V when we first tried it, spending part of each cycle below ground
-where the converter cannot follow.
+Here is the whole circuit with every node labelled:
 
-The divider fixes that by pinning one end. Two 10 kΩ resistors in series across
-3.3 V form a loop carrying `3.3 V ÷ 20 kΩ = 165 µA`. That same current flows
-through both resistors, so each drops `165 µA × 10 kΩ = 1.65 V`, and their joint
-sits at 1.65 V above ground. A1 is wired to that joint.
+```
+      ESP32 3V3   3.300 V
+            ●
+            │
+          ┌─┴─┐
+          │R1 │ 10 kΩ          165 µA flows down through both
+          └─┬─┘                resistors continuously. This is DC
+            │                  and carries no signal.
+            ├────────────────────────────●  A1    1.650 V, never moves
+            │
+   node M   │      ┌──────────────────┐
+   1.650 V  ├──────┤ CT burden, 20 Ω  ├──●  A0    1.650 V + v(t)
+            │      │   v(t) across it │
+            │      └──────────────────┘
+          ┌─┴─┐
+          │R2 │ 10 kΩ
+          └─┬─┘
+            │
+            ●   GND   0.000 V
+```
 
-The coil holds a fixed difference between its two ends, so with one end pinned at
-1.65 V the other has nowhere to go but 1.65 V plus that difference. Note that the
-coil itself knows nothing about 1.65 V and produces nothing relative to it. All
-the coil does is create a difference; the divider decides what that difference is
-measured against.
+The whole vertical run between R1 and R2 is a single node, with the A1 pin and
+one leg of the clamp both tapped off it.
 
-The clamp isn't loaded by any of this. At our gain the ADS1115 presents about
-5 MΩ across its two inputs, so the 51.9 mV signal pushes only about 10 nA into
-the chip. Compare that with the 2.6 mA circulating through the burden resistor
-inside the clamp: the chip is drawing roughly one part in 250,000. The burden
-does the current-to-voltage conversion and the converter watches the result
-without disturbing it.
+#### Why anything needs anchoring
+
+Voltage is always a difference between two points. There is no such thing as the
+voltage *at* a place. The clamp produces a difference between its two wires and
+says nothing about where either wire sits relative to the ESP32's ground. Both
+could be at 1 V, or both at 400 V, and the clamp would be equally content,
+because it only controls the gap.
+
+The ADS1115 is not so relaxed. Both its inputs must stay between 0 V and 3.3 V.
+So something has to decide where the pair sits, and the clamp will not do it.
+
+#### How the anchoring physically works
+
+Two 10 kΩ resistors in series across 3.3 V carry `3.3 V ÷ 20 kΩ = 165 µA`. The
+same current runs through both, so each drops `165 µA × 10 kΩ = 1.65 V`, putting
+their joint at 1.65 V.
+
+That joint behaves like a spring anchored at 1.65 V. Push it up and the current
+through R1 falls while the current through R2 rises, and the imbalance produces a
+restoring drop. The stiffness of the spring is the two resistors in parallel,
+5 kΩ:
+
+```
+to move node M by 1 mV    you must inject   200 nA
+to move node M by 100 mV  you must inject    20 µA
+```
+
+So it isn't rigid. It's a spring whose strength you can calculate.
+
+#### Two loops, sharing the burden resistor
+
+The question this raises is whether the clamp pushes that spring around. It
+barely does, and the reason is about where current goes rather than how stiff the
+spring is. There are two current loops, and they share the burden resistor:
+
+```
+  Loop 1, inside the clamp housing:
+      coil  →  burden resistor  →  back to coil
+      2.6 mA at 5.19 A through the jaws. This creates the voltage.
+
+  Loop 2, out to the chip:
+      burden  →  A0  →  chip's 5 MΩ input  →  A1  →  back to burden
+      10 nA. This measures the voltage.
+```
+
+Loop 2 passes through node M, but the current entering M from the chip equals the
+current leaving M into the clamp. **Net current into the divider is zero.** The
+signal current circulates in its own ring and the spring is never pushed.
+
+Another way to see the same thing: the chip's input sits in parallel with the
+burden resistor, and 5 MΩ in parallel with 20 Ω is 19.99992 Ω. The chip is
+electrically almost not there. It draws one part in 250,000 of what's already
+circulating, so measuring doesn't change what's being measured.
+
+Note where the divider sits in that picture. It's in neither loop. It carries no
+signal current and is not part of the measurement path. Its only job is to hold
+node M at a height where both ends of the burden land inside the window the chip
+can read.
+
+#### When the node does move, it cancels
+
+Stray capacitance from nearby mains wiring does push a little current into node M.
+Measured drift is 3.2 mV rms, which works out at about 640 nA against the 5 kΩ
+spring, and 3.2 mV is roughly 51 counts.
+
+Yet the clamp channel with empty jaws reads 2 to 4 counts. Fifty-one counts of
+movement on the midpoint produced three counts in the answer, because when M
+shifts, A0 shifts by the same amount at the same instant. The subtraction removes
+it.
+
+**The counter-example is how this project started.** With no divider, node M was
+still tied to A0 through the clamp, but nothing set the pair's absolute level. A
+few picoamps of stray coupling dragged the whole thing around by 3915 mV while
+the difference between A0 and A1 stayed at 3 counts. The clamp was working
+perfectly throughout. What was missing was any statement about where the pair
+should sit.
+
+The picture worth holding: the clamp is a rigid rod of a certain length. The
+divider decides where one end of it is. The other end goes wherever the rod's
+length puts it. Moving the whole rod doesn't change its length.
 
 ### 4. Analogue to digital
 
 The multiplexer selects A0 minus A1, the amplifier doubles it, and the converter
-turns it into a signed 16-bit count where 62.5 µV is one unit. The 51.9 mV rms
-signal becomes about 830 counts rms, against a noise floor of one count.
+turns it into a signed 16-bit count where 62.5 µV is one unit.
+
+**The 51.9 mV is an RMS figure, not a fixed voltage.** It summarises a whole
+cycle. The actual voltage is a 50 Hz sine that crosses zero a hundred times a
+second and peaks at `51.9 × √2 = 73.4 mV`. Here is the circuit at four moments:
+
+| Moment | Across the burden | A1 | A0 | A0 − A1 | Counts |
+|---|---|---|---|---|---|
+| Positive peak | +73.4 mV | 1.650 V | 1.7234 V | +73.4 mV | +1174 |
+| Zero crossing | 0 mV | 1.650 V | 1.650 V | 0 mV | 0 |
+| Negative peak | −73.4 mV | 1.650 V | 1.5766 V | −73.4 mV | −1174 |
+| Whole cycle, rms | 51.9 mV | 1.650 V | — | 51.9 mV | 831 |
+
+A1 is identical in every row. A0 does all the moving, which is exactly why the
+pair has to sit at 1.65 V rather than at 0 V: at 0 V the negative half of every
+cycle would fall below ground and the chip would lose it.
+
+The last row is not a moment in time like the others. It's a property of the whole
+cycle, computed from 167 samples spanning ten cycles.
+
+Against a noise floor of one count, 831 counts rms is a strong signal.
 
 ### 5. Over I2C to the ESP32
 
