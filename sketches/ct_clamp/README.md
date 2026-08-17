@@ -65,23 +65,63 @@ The chip contains five blocks worth knowing about.
 
 ### The multiplexer
 
-One converter serves all four input pins. The multiplexer decides which pin, or
-which pair of pins, is connected to the amplifier at any moment. It can select
-four single-ended inputs measured against ground, or four differential pairings.
-We use `MUX_DIFF_0_1`, meaning "A0 minus A1".
+The amplifier behind the multiplexer has two inputs, a positive and a negative,
+and it only ever cares about the voltage difference between them. The
+multiplexer is an array of solid-state switches (CMOS transmission gates) that
+decide which physical pin gets connected to each of those two inputs. Nothing is
+being "selected" in software terms; actual switches close.
 
-The consequence is that **channels are never read simultaneously**. Switching the
-multiplexer takes effect on the next conversion, which is why the sketch throws
-away two readings after every switch.
+There are eight valid switch settings:
+
+| Setting | Positive input connects to | Negative input connects to |
+|---|---|---|
+| `MUX_DIFF_0_1` | A0 | A1 |
+| `MUX_DIFF_0_3` | A0 | A3 |
+| `MUX_DIFF_1_3` | A1 | A3 |
+| `MUX_DIFF_2_3` | A2 | A3 |
+| `MUX_SINGLE_0` | A0 | internal ground |
+| `MUX_SINGLE_1` | A1 | internal ground |
+| `MUX_SINGLE_2` | A2 | internal ground |
+| `MUX_SINGLE_3` | A3 | internal ground |
+
+So a "single-ended" reading isn't a different kind of measurement. It's still a
+difference, with the negative side switched to the chip's own ground instead of
+to a pin.
+
+The sketch uses two of these. `MUX_DIFF_0_1` measures the clamp, giving A0 minus
+A1. `MUX_SINGLE_1` measures A1 against ground, which is how it checks the bias
+voltage.
+
+Two consequences follow from there being one set of switches and one converter:
+
+- **Channels are never measured at the same instant.** Reading A0 and A1
+  separately gives you two snapshots about a millisecond apart, not a
+  simultaneous pair.
+- **A switch change only takes effect on the next conversion.** The conversion
+  already in progress finishes using the old switch positions. That's why the
+  sketch discards two readings after every switch, at lines 88 to 91.
 
 ### The programmable gain amplifier
 
-This amplifies the input before the converter sees it. The converter always
-produces a signed 16-bit number spanning its own fixed range, so amplifying a
-small signal first spreads it across more of those numbers. The chip's reference
-is 4.096 V, and the measurable range is that divided by the gain.
+**The gain is a plain multiplication of voltage.** Gain of 2 means the amplifier
+puts out twice the voltage difference presented at its inputs. Gain of 16 means
+sixteen times.
 
-| Setting | Gain | Range | Per count | Per count in amps | Clips at |
+The reason that matters is what sits behind it. The modulator can only digitise
+voltages up to its own reference of 4.096 V, and that limit is fixed in silicon.
+So the amplifier's output has to land inside ±4.096 V, which means the largest
+input you can present is:
+
+```
+max input = 4.096 V / gain
+```
+
+**That number is an input range, measured at the pins.** It is not an output
+range and it has nothing to do with the size of the numbers you get back. The
+datasheet calls it the full scale range, or FSR, and it's what the table below
+lists.
+
+| Setting | Amplifier gain | Max input at the pins (FSR) | Volts per count | Amps per count | Max current, rms |
 |---|---|---|---|---|---|
 | `GAIN_TWOTHIRDS` | ×⅔ | ±6.144 V | 187.5 µV | 18.8 mA | 434 A |
 | `GAIN_ONE` | ×1 | ±4.096 V | 125 µV | 12.5 mA | 290 A |
@@ -90,31 +130,96 @@ is 4.096 V, and the measurable range is that divided by the gain.
 | `GAIN_EIGHT` | ×8 | ±0.512 V | 15.6 µV | 1.6 mA | 36 A |
 | `GAIN_SIXTEEN` | ×16 | ±0.256 V | 7.8 µV | 0.8 mA | 18 A |
 
-This is real extra resolution rather than bigger numbers, because the
-amplification happens in the analogue domain before quantisation. Going past the
-range makes the reading saturate at ±32767, which flattens the peaks of the
-waveform and makes the RMS read low without any obvious warning.
+**The output range never changes.** Whatever the gain, the result is a signed
+16-bit integer from −32768 to +32767, where +32767 means "input reached the
+positive FSR" and −32768 means it reached the negative FSR. So:
 
-Note that `GAIN_TWOTHIRDS` showing ±6.144 V is a scaling factor and not
-permission to apply 6 V. Inputs must still stay between ground and VDD.
+```
+one count = FSR / 32768
+counts    = input volts × 32768 / FSR
+```
+
+Worked through at our setting of `GAIN_TWO`, FSR ±2.048 V:
+
+| Input at the pins | Amplifier output | Fraction of ±4.096 V | Counts |
+|---|---|---|---|
+| 2.048 V | 4.096 V | 100% | +32767 (full scale) |
+| 1.000 V | 2.000 V | 48.8% | +16000 |
+| 51.9 mV | 103.8 mV | 2.5% | +830 |
+| 62.5 µV | 125 µV | 0.003% | +1 (one count) |
+| 0 V | 0 V | 0% | 0 |
+| −1.000 V | −2.000 V | −48.8% | −16000 |
+
+Turning the gain up gives real extra resolution rather than just bigger numbers,
+because the multiplication happens in the analogue domain before anything is
+rounded to an integer. Doubling in software afterwards would give you 32000
+instead of 16000, but with the same underlying uncertainty. Doubling in the
+amplifier gives you 32000 counts that each mean half as much voltage.
+
+Going past the FSR makes the reading stick at ±32767. The waveform comes back
+with flat tops and the RMS reads low, with nothing in the output to warn you.
+
+One trap: `GAIN_TWOTHIRDS` lists ±6.144 V, which is larger than the 3.3 V supply.
+That is arithmetic from 4.096 ÷ ⅔ and not permission to apply 6 V to the pins.
+The absolute limit is still the supply rails, regardless of gain.
 
 ### The delta-sigma converter
 
-This works nothing like the successive-approximation converters in most
-microcontrollers, which compare the input against a ladder of reference voltages
-one bit at a time.
+This works nothing like the successive-approximation converter inside the ESP32,
+which compares the input against a ladder of reference voltages one bit at a
+time and needs a sample-and-hold circuit to keep the input still while it does.
 
-Instead, a single-bit comparator runs at a rate far above the output rate. Its
-output feeds back through a one-bit DAC and gets subtracted from the input, and
-the running error accumulates in an integrator. The result is a stream of ones
-and zeroes whose *density* tracks the input voltage. Feed in half of full scale
-and roughly three quarters of the bits come out as ones.
+A delta-sigma converter has no ladder. It has three parts in a feedback loop:
 
-A digital filter then averages that bitstream over a window and produces the
-16-bit result. This is where the data rate setting bites: a slower rate averages
-over a longer window and gives a quieter reading. At 8 SPS the ADS1115 is
-genuinely 16-bit-quiet; at our 860 SPS the last bit or so is noise, which matches
-what the empty-clamp capture showed (readings bouncing between adjacent counts).
+- an **integrator**, which is a running total
+- a **one-bit comparator**, which asks "is the running total above zero?"
+- a **one-bit DAC**, which feeds either +full-scale or −full-scale back to be
+  subtracted from the input
+
+Each tick of its internal clock, the loop does this:
+
+```
+bit   = (accumulator >= 0) ? 1 : 0
+accumulator += input − (bit ? +full_scale : −full_scale)
+```
+
+The feedback constantly drags the accumulator back towards zero, so the
+comparator has to emit ones and zeroes in whatever mixture cancels the input. The
+result is a stream of bits whose **proportion of ones encodes the voltage**.
+
+Here it is running with an input at half of full scale, on a scale where full
+scale is 1.0:
+
+| Tick | Accumulator before | Bit out | Feedback | Accumulator after |
+|---|---|---|---|---|
+| 1 | 0.0 | 1 | −1.0 | −0.5 |
+| 2 | −0.5 | 0 | +1.0 | +1.0 |
+| 3 | +1.0 | 1 | −1.0 | +0.5 |
+| 4 | +0.5 | 1 | −1.0 | 0.0 |
+| 5 | 0.0 | 1 | −1.0 | −0.5 |
+| 6 | −0.5 | 0 | +1.0 | +1.0 |
+| 7 | +1.0 | 1 | −1.0 | +0.5 |
+| 8 | +0.5 | 1 | −1.0 | 0.0 |
+
+It settles into `1110` repeating. Three ones in every four, a density of 0.75.
+Reading that back out, `2 × 0.75 − 1 = 0.5`, which is the input we put in. Feed
+in zero and you get `1010` alternating, a density of 0.5, which maps to 0.
+Feed in full scale and you get solid ones.
+
+The **digital filter** is what turns that bitstream into a number. It counts the
+ones over a window and scales the result to 16 bits. No single bit carries any
+precision at all; the precision comes entirely from averaging thousands of them.
+
+This is where the data rate setting bites. The modulator runs at a fixed rate
+regardless of your setting, so a slower output rate simply averages more bits per
+result:
+
+- At **8 SPS** the filter averages roughly 107 times as many modulator bits as at
+  860 SPS, and the reading is quiet to nearly the full 16 bits.
+- At **860 SPS**, which is what we use, the last bit or so is noise.
+
+That last point is exactly what the empty-clamp capture showed: readings hopping
+between adjacent counts, 6.25 mA apart, with nothing in between.
 
 ### The registers
 
@@ -243,13 +348,23 @@ potential is relative to the ESP32's ground, so the pair drifts, and it drifted
 by about 4 V when we first tried it, spending part of each cycle below ground
 where the converter cannot follow.
 
-The divider fixes that by pinning one end. 165 µA flows continuously from 3.3 V
-through both resistors to ground, and since they're equal each drops half the
-supply, putting their joint at 1.65 V. A1 is wired to that joint, so A0 has
-nowhere to go but 1.65 V plus whatever the coil produces.
+The divider fixes that by pinning one end. Two 10 kΩ resistors in series across
+3.3 V form a loop carrying `3.3 V ÷ 20 kΩ = 165 µA`. That same current flows
+through both resistors, so each drops `165 µA × 10 kΩ = 1.65 V`, and their joint
+sits at 1.65 V above ground. A1 is wired to that joint.
 
-Almost no current flows into the chip's inputs, well under a microamp, so the
-clamp isn't loaded and its full voltage appears across A0 and A1.
+The coil holds a fixed difference between its two ends, so with one end pinned at
+1.65 V the other has nowhere to go but 1.65 V plus that difference. Note that the
+coil itself knows nothing about 1.65 V and produces nothing relative to it. All
+the coil does is create a difference; the divider decides what that difference is
+measured against.
+
+The clamp isn't loaded by any of this. At our gain the ADS1115 presents about
+5 MΩ across its two inputs, so the 51.9 mV signal pushes only about 10 nA into
+the chip. Compare that with the 2.6 mA circulating through the burden resistor
+inside the clamp: the chip is drawing roughly one part in 250,000. The burden
+does the current-to-voltage conversion and the converter watches the result
+without disturbing it.
 
 ### 4. Analogue to digital
 
@@ -259,27 +374,80 @@ signal becomes about 830 counts rms, against a noise floor of one count.
 
 ### 5. Over I2C to the ESP32
 
-I2C is two wires, a clock and a data line, both open-drain with pull-up
-resistors so any device can hold them low. The ESP32 is the master and drives the
-clock at 400 kHz.
+I2C is two wires shared by every device on the bus: **SCL** carries the clock,
+**SDA** carries the data. Both go to GPIO21 and GPIO22 on the ESP32.
 
-Reading one conversion is two transactions:
+**Why the pull-up resistors matter.** No device on an I2C bus is ever allowed to
+drive a wire high. Each one can only either pull it down to ground or let go.
+This is called open-drain, and the wire is held high by a resistor to 3.3 V
+whenever nobody is pulling. The effect is that the line reads high only when
+every device has let go, so two devices talking at once can never fight and
+short each other out. The ADS1115 breakout board has these resistors fitted
+already, which is why you didn't need to add any.
+
+**Who drives what.** The ESP32 is the master. It generates every clock pulse on
+SCL and starts and ends every transaction. The ADS1115 never speaks unless
+spoken to, and it has no way to interrupt or volunteer data.
+
+**How a device gets addressed.** Each device has a 7-bit address, 0x48 for our
+chip. The master sends that address followed by one more bit saying whether it
+wants to read or write. Every device on the bus compares the address with its
+own, and the one that matches pulls SDA low for a ninth clock pulse to say "that's
+me". That acknowledgement is how `scanI2C` works: it sends an address and checks
+whether anything pulled the line down.
+
+**START and STOP** are the two illegal-looking signals that bracket a
+transaction. Normally SDA is only allowed to change while SCL is low. A START is
+SDA falling *while SCL is high*, and a STOP is SDA rising while SCL is high.
+Because those transitions can't occur during ordinary data, every device
+recognises them unambiguously.
+
+**The pointer register.** The ADS1115 has four registers but no address bus to
+pick between them. Instead it has a pointer: a small internal value saying which
+register the next read or write will land on. So reading a conversion is two
+transactions, one to aim the pointer and one to collect the data:
 
 ```
-START | 0x48+W | 0x00 (pointer to conversion register) | STOP
-START | 0x48+R | read MSB | read LSB | STOP
+START │ 0x48 + write bit │ ACK │ 0x00  (aim pointer at conversion register) │ ACK │ STOP
+START │ 0x48 + read bit  │ ACK │ read high byte │ ACK │ read low byte │ NACK │ STOP
 ```
 
-Every byte gets acknowledged by the receiver pulling the data line low for a
-ninth clock. The two bytes are big-endian and represent a signed 16-bit value.
+The two data bytes arrive most significant first and together form a signed
+16-bit two's complement number. The master sends NACK rather than ACK after the
+last byte, which is how it tells the chip to stop sending.
 
-At 400 kHz this takes well under 100 µs, so the bus is nowhere near the
-bottleneck. The converter is the slow part at 860 conversions per second.
+At 400 kHz each bit takes 2.5 µs, so the whole exchange above is roughly 40 bits
+and finishes in about 100 µs. **The bus is nowhere near the bottleneck.** The
+converter is, at 860 conversions per second, one every 1163 µs. This is the
+opposite of what most people assume, and it's why the sketch deliberately slows
+its reads down to match the converter rather than reading as fast as it can.
 
 ### 6. Counts to amps
 
-The sketch accumulates statistics as it samples, then converts once at the end.
-See the RMS algorithm below.
+**Why RMS and not the average.** The average of a sine wave over a whole cycle is
+zero, because it spends as long negative as positive. Averaging the samples tells
+you nothing about how much current is flowing. RMS is defined so that it answers
+a physical question: what steady DC current would heat a resistor at the same
+rate? That's the number that relates to power, so it's the one worth computing.
+
+The sketch keeps running totals while sampling and does all the conversion once
+at the end, in three multiplications:
+
+```
+831 counts rms                          the AC part, from the running totals
+  × 62.5 µV per count      = 51.9 mV    volts at the ADS1115 pins
+  × 100 A per volt         = 5.19 A     current through the jaws
+  × 240 V (assumed)        = 1246 VA    apparent power
+```
+
+Every one of those constants comes from somewhere specific. The 62.5 µV is read
+back from the library at line 193 based on the gain setting, so it tracks
+automatically if you change line 191. The 100 comes from the clamp's own
+specification. The 240 is hardcoded and is the weakest link, since it's an
+assumption about your supply rather than anything measured.
+
+How the 831 is arrived at is the interesting part, covered under the RMS
+algorithm below.
 
 ### 7. Down the wire to the laptop
 
@@ -362,8 +530,19 @@ variance = mean(x²) − mean(x)²
 ```
 
 which lets it accumulate `sum` and `sumSq` in a single pass and compute the
-variance at the end (line 119). The square root of the variance is exactly the
-RMS of the signal with its mean removed, which is what we want.
+variance at the end (line 119).
+
+The square root of the variance is exactly the RMS of the signal with its mean
+removed. That falls straight out of the definitions:
+
+```
+AC RMS = sqrt( mean( (x − mean)² ) ) = sqrt( variance ) = standard deviation
+```
+
+So **the AC RMS of a signal and the standard deviation of its samples are the
+same quantity**, with two names depending on whether you're doing electronics or
+statistics. Once you see that, the single-pass trick is just the standard
+computational formula for variance that any statistics library uses.
 
 Line 120 clamps negative variance to zero. That can't happen mathematically, but
 floating point rounding can produce a tiny negative number when the true variance
@@ -429,8 +608,9 @@ Four layers, none of which know about each other.
 
 ### Physical: USB to UART
 
-The ESP32 speaks UART, a two-wire asynchronous serial protocol at 3.3 V logic
-levels. Your laptop speaks USB. The CP2102N chip on the DevKitC bridges the two.
+The ESP32 speaks UART, an asynchronous serial protocol at 3.3 V logic levels
+carried on a transmit line, a receive line, and a shared ground. Your laptop
+speaks USB. The CP2102N chip on the DevKitC bridges the two.
 
 macOS has a built-in driver for it and exposes it as two character devices:
 
@@ -442,13 +622,38 @@ modems and will hang.
 
 ### Framing: 8N1 at 9600 baud
 
-Each byte goes out as a start bit, eight data bits least significant first, no
-parity bit, and one stop bit. Ten bits per byte, so 9600 baud carries 960 bytes
-per second.
+**Asynchronous means there is no clock wire.** Unlike I2C, where the master
+supplies a clock pulse for every bit, UART has only a transmit line, a receive
+line, and a shared ground. Both ends have to already agree how long a bit lasts,
+and that agreement is the baud rate. Set 9600 on one end and 115200 on the other
+and you get garbage, because the receiver samples at the wrong moments.
+
+The line idles high. Each byte is framed like this:
+
+```
+idle    start   b0  b1  b2  b3  b4  b5  b6  b7   stop   idle
+─────┐        ┌───┬───┬───┬───┬───┬───┬───┬───┐        ┌─────
+     └────────┤   │   │   │   │   │   │   │   ├────────┘
+      1 bit                8 data bits           1 bit
+```
+
+The **start bit** is the whole trick. It's a single low bit that breaks the idle
+high state, and its falling edge tells the receiver "a byte begins now". The
+receiver then counts off bit periods from that edge using its own local clock,
+sampling in the middle of each one. Data goes least significant bit first. The
+**stop bit** returns the line high so the next start bit has an edge to make.
+
+So 8N1 means eight data bits, no parity bit, one stop bit. Add the start bit and
+that's ten bits on the wire per byte of payload, which is why 9600 baud carries
+960 bytes per second rather than 1200.
+
+Each end only needs its clock accurate to within a few percent, because
+resynchronisation happens at every start bit and there are only ten bit periods
+to drift across before the next one.
 
 There is no addressing, no error detection, no retransmission, and no flow
-control. It is a raw byte pipe in both directions at once, and either end can
-transmit whenever it likes without disturbing the other.
+control. It's a raw byte pipe running in both directions at once, and either end
+can transmit whenever it likes without disturbing the other.
 
 ### The reset side-channel
 
@@ -523,21 +728,45 @@ timestamps, which is how we know the pacing loop holds 1200 µs to within 0.6 µ
 
 ### `dominant_frequency`
 
-Applies a Hann window, then a real FFT.
+**What an FFT actually does.** Any repeating signal, however lumpy, can be
+written as a sum of pure sine waves at different frequencies. An FFT takes your
+512 samples and works out how much of each frequency is present, returning one
+magnitude per frequency. A clean 50 Hz sine gives one tall value at 50 Hz and
+near-nothing elsewhere, which is exactly what the kettle capture produced. A
+signal with distortion would show extra peaks at multiples of 50.
 
-The window is there to stop spectral leakage. An FFT assumes the signal repeats
-forever, so if the capture doesn't contain a whole number of cycles there's a
-discontinuity at the join, which smears energy across every frequency bin. The
-Hann window tapers both ends to zero and removes the discontinuity.
+The frequencies it reports are not arbitrary. They come out evenly spaced from
+0 Hz up to half the sample rate, and the spacing is:
 
-It then finds the tallest bin, ignoring DC, and compares it against the median
-bin. If the peak isn't at least five times the median the spectrum is flat and it
-returns `None` rather than naming a frequency. Without that check an empty clamp
-reports the tallest lump of noise as if it were a real signal.
+```
+bin spacing = sample rate / number of samples = 833 / 512 = 1.63 Hz
+```
 
-**Frequency resolution** is the sample rate divided by the sample count, so
-833 ÷ 512, about 1.63 Hz per bin. That's why a 50 Hz signal reports as 50.5 Hz.
-The grid isn't drifting, the bins just aren't finer than that.
+Those are called bins, and nothing between them can be distinguished. The nearest
+bin to 50 Hz sits at 50.4, which is why the capture reports 50.5 Hz. **The grid
+isn't drifting**, the resolution just isn't finer than 1.63 Hz. Capturing more
+samples would narrow the bins.
+
+**Why it stops at half the sample rate.** You need at least two samples per cycle
+to tell a wave is oscillating at all. Above half the sample rate a signal
+produces exactly the same set of samples as some lower frequency would, so the
+converter cannot tell them apart and the higher one shows up disguised as a lower
+one. That's aliasing, and half the sample rate is the Nyquist limit. Here it's
+417 Hz.
+
+**Why the Hann window.** An FFT assumes the 512 samples repeat forever, joined
+end to end. If the capture doesn't contain a whole number of cycles, the last
+sample doesn't line up with the first and there's a sharp step at the join. That
+step is not in your signal, but the FFT sees it and smears energy across every
+bin, which is called spectral leakage. Multiplying the samples by a Hann window,
+a raised cosine that tapers to zero at both ends, removes the step so the peak
+stays sharp.
+
+**The flat-spectrum check.** It finds the tallest bin, ignoring DC, and compares
+it against the median bin. If the peak isn't at least five times the median, the
+spectrum is just noise and it returns `None` rather than naming a frequency.
+Without that check, an empty clamp reports the tallest lump of noise as though it
+meant something, which is what the first capture did before this was added.
 
 ### `plot`
 
