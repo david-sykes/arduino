@@ -99,7 +99,8 @@ Two consequences follow from there being one set of switches and one converter:
   simultaneous pair.
 - **A switch change only takes effect on the next conversion.** The conversion
   already in progress finishes using the old switch positions. That's why the
-  sketch discards two readings after every switch, at lines 88 to 91.
+  sketch discards two readings after every switch, in both `sampleMux` and
+  `captureRaw`.
 
 ### The programmable gain amplifier
 
@@ -543,8 +544,8 @@ at the end, in three multiplications:
 ```
 
 Every one of those constants comes from somewhere specific. The 62.5 µV is read
-back from the library at line 193 based on the gain setting, so it tracks
-automatically if you change line 191. The 100 comes from the clamp's own
+back from the library by `computeVolts(1)` based on the gain setting, so it
+tracks automatically if you change the `setGain` call. The 100 comes from the clamp's own
 specification. The 240 is hardcoded and is the weakest link, since it's an
 assumption about your supply rather than anything measured.
 
@@ -559,64 +560,45 @@ exposes it as a character device, and Python reads it. Covered in section 4.
 
 ---
 
-## 3. The sketch, line by line
+## 3. The sketch
 
-### Configuration, lines 20 to 48
+[`ct_clamp.ino`](ct_clamp.ino) is commented throughout, line by line, so this
+section doesn't repeat what the comments already say. It covers the four things
+that need more room than a comment can reasonably take.
+
+The sketch has five functions:
+
+| Function | Job |
+|---|---|
+| `scanI2C` | Report every device answering on the bus, so a miswired chip is obvious |
+| `sampleMux` | Sample one input for a window and return summary statistics |
+| `captureRaw` | Same sampling loop, but keep every sample and print them as CSV |
+| `setup` | Runs once: start the bus, configure the chip, print a banner |
+| `loop` | Runs forever: check for a request, take a reading, print it, wait a second |
+
+`sampleMux` is where all the real work happens. Everything else is presentation.
+
+### `Stats`, and why it exists
+
+A C function can only return one value, and `sampleMux` needs to hand back four.
+A `struct` solves that: it defines a new type gluing several values together
+under one name.
 
 ```cpp
-#include <Wire.h>                  // ESP32 I2C driver
-#include <Adafruit_ADS1X15.h>      // ADS1115 register wrangling
+struct Stats {
+    long n;                   // how many samples were taken
+    double meanCounts;        // their average, the DC level
+    double acRmsCounts;       // RMS after removing that average
+    long peakToPeakCounts;    // largest sample minus smallest
+};
 ```
 
-- **23 to 25** — I2C pins and the chip's address. 0x48 is what the ADS1115 uses
-  when its ADDR pin is tied low or left at the module's default.
-- **27** `SAMPLE_INTERVAL_US 1200` — a conversion at 860 SPS takes about 1163 µs.
-  Reading faster than that returns the same value twice, so this paces the reads
-  just past the conversion time. Actual achieved rate is 833 SPS.
-- **28** `WINDOW_MS 200` — the measurement window. 200 ms is exactly ten cycles
-  of 50 Hz, so the RMS covers whole cycles and has no partial cycle to skew it.
-- **31** `AMPS_PER_VOLT 100.0` — the clamp's calibration constant.
-- **32** `MAINS_VOLTAGE 240.0` — only used for the rough watts figure. This is an
-  assumption, not a measurement.
-- **35** `NOISE_FLOOR_AMPS 0.05` — below this the reading is chip noise, so the
-  sketch says so rather than printing a meaningless number.
-- **40** `RAW_SAMPLES 512` — the raw dump buffer size.
-- **47 to 48** — the buffers. 512 samples costs 1 KB for the counts and 2 KB for
-  the timestamps, which is nothing against the ESP32's 320 KB.
+After that definition `Stats` is a type like `int` or `float`, so
+`Stats ct = sampleMux(...)` declares one and `ct.acRmsCounts` reads a
+compartment out of it. No behaviour, just four labelled boxes travelling
+together.
 
-### `scanI2C`, lines 57 to 79
-
-Walks every address from 1 to 126, starts a transmission to each, and checks
-whether anything acknowledged. `Wire.endTransmission()` returning 0 means a
-device pulled the data line low in response to its address.
-
-This exists so that a dead or miswired chip is obvious immediately rather than
-showing up as strange numbers later.
-
-### `sampleMux`, lines 81 to 127
-
-The core measurement routine. Takes a multiplexer setting and a window length,
-returns statistics.
-
-- **84** `startADCReading(mux, true)` — writes 0x84E0 to the config register,
-  which sets the multiplexer, gain and rate, and puts the chip into continuous
-  conversion.
-- **88 to 91** — a multiplexer change only takes effect on the following
-  conversion, so the first two results still reflect the old channel. These two
-  reads throw them away.
-- **93 to 97** — accumulators. `sum` and `sumSq` are `double` because the sum of
-  squares gets large.
-- **102** — loop until the window elapses.
-- **103 to 105** — the pacing loop. `(long)(micros() - nextUs) < 0` handles the
-  32-bit counter wrapping correctly, because the subtraction wraps too and the
-  cast interprets the result as a signed offset. Comparing `micros() < nextUs`
-  directly would break every 71 minutes when the counter rolls over.
-- **106** — advance the target by a fixed step rather than from "now", so timing
-  errors don't accumulate over the window.
-- **108 to 113** — read the conversion register and update the running totals.
-- **118 to 124** — the statistics, explained below.
-
-#### The RMS algorithm
+### The RMS algorithm
 
 RMS means root mean square: square every sample, take the mean, take the square
 root. But we want the RMS of the *AC part*, with any DC offset removed, because a
@@ -631,8 +613,13 @@ Instead the sketch uses the identity
 variance = mean(x²) − mean(x)²
 ```
 
-which lets it accumulate `sum` and `sumSq` in a single pass and compute the
-variance at the end (line 119).
+which lets it accumulate `sum` and `sumSq` in a single pass and work the variance
+out at the end:
+
+```cpp
+double mean     = sum / n;
+double variance = (sumSq / n) - (mean * mean);
+```
 
 The square root of the variance is exactly the RMS of the signal with its mean
 removed. That falls straight out of the definitions:
@@ -646,9 +633,11 @@ same quantity**, with two names depending on whether you're doing electronics or
 statistics. Once you see that, the single-pass trick is just the standard
 computational formula for variance that any statistics library uses.
 
-Line 120 clamps negative variance to zero. That can't happen mathematically, but
-floating point rounding can produce a tiny negative number when the true variance
-is near zero, and `sqrt` of that gives NaN.
+The `if (variance < 0) variance = 0;` line after it looks pointless, since
+variance can never truly be negative. It's there because floating point rounding
+can produce a tiny negative value when the real variance is near zero, and
+`sqrt()` of a negative number returns NaN, which would then poison every
+calculation downstream.
 
 **Known weakness.** This form loses precision when the mean is large compared
 with the spread, because it subtracts two nearly equal large numbers. For the
@@ -658,49 +647,80 @@ discards perhaps six of the fifteen significant digits a `double` carries. Still
 plenty here, but Welford's online algorithm would be the robust replacement if
 this ever moved to `float` or to much larger offsets.
 
-### `captureRaw`, lines 129 to 164
+### The pacing loop, and a cast that looks wrong
 
-Same sampling loop, but storing every sample instead of summarising.
+The line that stops the sketch reading the same conversion twice is this:
 
-- **137 to 147** — fill the buffers, recording the actual microsecond offset of
-  each sample so the timing can be checked afterwards. Measured jitter is 0.6 µs.
-- **149 to 155** — a header block. The calibration constants travel with the data
-  so the Python side never has to hardcode them.
-- **157 to 161** — the dump.
+```cpp
+while ((long)(micros() - nextUs) < 0) {
+    // Wait out the conversion so we don't re-read the same value.
+}
+```
 
-**Why it buffers first.** At 9600 baud the serial port carries about 960
-characters per second. Each sample line is roughly 13 characters, and we produce
-833 samples per second, needing over 10,000 characters per second. Printing
-while sampling would stall the loop and wreck the timing. So it records into RAM
-at full speed and spends about seven seconds printing afterwards.
+The obvious version would be `while (micros() < nextUs)`, and it would work
+almost all the time. `micros()` counts microseconds since the board powered up in
+a 32-bit unsigned integer, which runs out after about 71 minutes and wraps back
+to zero. When it does, `micros()` becomes a tiny number while `nextUs` is still
+huge, the comparison stays true, and the sketch sits in that loop for the next 71
+minutes.
 
-### `setup`, lines 166 to 210
+Subtracting first fixes it. The subtraction wraps in exactly the same way the
+counter does, so `micros() - nextUs` gives the correct gap either side of the
+wrap. Casting that to a signed `long` lets it be read as "how far past due are
+we", negative before the deadline and positive after. This is the standard
+Arduino idiom for timing, and it is worth recognising because it looks like a
+pointless cast until you know what it's protecting against.
 
-- **179** `Wire.begin(21, 22)` — the ESP32 can route I2C to almost any pin, so
-  the pins are given explicitly.
-- **180** `Wire.setClock(400000)` — I2C fast mode. The default 100 kHz would also
-  work, this just leaves more headroom.
-- **184** — `ads.begin()` returns false if nothing acknowledges at 0x48, in which
-  case `adsReady` stays false and the sketch prints nothing misleading.
-- **191 to 192** — gain and data rate.
-- **193** `computeVolts(1)` — asks the library what one count is worth in volts,
-  given the gain just set. Everything downstream scales from this single value,
-  so changing line 191 is enough to reconfigure the whole sketch.
+The next line matters too:
 
-### `loop`, lines 212 to 272
+```cpp
+nextUs += SAMPLE_INTERVAL_US;
+```
 
-- **213 to 216** — if the chip never answered, idle rather than print rubbish.
-- **218 to 224** — check for an incoming request. `Serial.available()` reports how
-  many bytes are waiting and returns immediately, so this polls rather than
-  blocks. The `return` on 222 skips the normal summary for that pass, so a
-  seven-second dump isn't immediately followed by a reading.
-- **228** — measure A1 against ground for 40 ms. This is the bias health check.
-- **229** — measure A0 minus A1 for 200 ms. This is the actual current.
-- **231 to 234** — convert counts to millivolts, then to amps.
-- **244 to 246** — flag an out-of-range bias. If the midpoint isn't sitting where
-  it should, the current figure below it is meaningless, and this says so.
-- **257 to 260** — refuse to report a current below the noise floor.
-- **271** — one second between readings.
+The deadline advances by a fixed step rather than being recalculated from the
+current time. If it were set to `micros() + SAMPLE_INTERVAL_US` instead, every
+small overshoot would be baked in and the errors would pile up across the window.
+Stepping a fixed amount means the schedule stays absolute and drift can't
+accumulate. Measured jitter over 512 samples is 0.6 µs.
+
+### Why `captureRaw` buffers before printing
+
+It records all 512 samples into RAM first and prints them afterwards, which looks
+like an unnecessary complication until you compare the two rates.
+
+```
+serial port at 9600 baud   ~960 characters per second
+sampling at 833 SPS        ~13 characters per sample = ~10,800 per second
+```
+
+Printing while sampling would block the loop waiting for the serial port to
+drain, the pacing would collapse, and the timing of every sample after the first
+would be meaningless. So it samples flat out for 0.6 seconds and then spends
+about seven seconds trickling the result out.
+
+The header block it prints first carries the calibration constants with the data:
+
+```
+#volts_per_count=0.000062500
+#amps_per_volt=100.00
+```
+
+That way the Python script never hardcodes values that live in the sketch. Change
+the gain and the script follows automatically.
+
+### One value that configures everything
+
+In `setup`, after the gain is set:
+
+```cpp
+ads.setGain(GAIN_TWO);
+voltsPerCount = ads.computeVolts(1);
+```
+
+`computeVolts(1)` asks the library what a single count is worth in volts at
+whatever gain was just selected. Every conversion from counts to real units
+downstream goes through that one number, so changing the `setGain` line is enough
+to reconfigure the whole sketch. Nothing else needs touching.
 
 ---
 
@@ -907,7 +927,7 @@ anything with a switching supply.
 **The gain is set conservatively.** `GAIN_TWO` clips at 145 A, beyond what the
 clamp is even rated for. `GAIN_EIGHT` would clip at 36 A and improve resolution
 from 6.25 mA to 1.6 mA per count, which would make standby loads of a watt or two
-visible. One-line change at line 191.
+visible. One-line change to the `setGain` call in `setup`.
 
 **Mains voltage is assumed, not measured.** `MAINS_VOLTAGE` is hardcoded at 240.
 
